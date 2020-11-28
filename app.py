@@ -101,6 +101,9 @@ class Participant(db.Model):
     state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
     place = Column(Integer)
 
+    user = relationship('User')
+    tournament = relationship('Tournament', backref=backref('participants'))
+
 
 class TeamParticipant(db.Model):
     __tablename__ = 'team_participants'
@@ -110,12 +113,15 @@ class TeamParticipant(db.Model):
     state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
     place = Column(Integer)
 
+    team = relationship('Team')
+    tournament = relationship('Tournament', backref=backref('team_participants'))
+
 
 def with_user(callee):
     @functools.wraps(callee)
     def wrapper(*args, **kwargs):
         if not is_valid(query=request.args, secret=current_app.config['VK_SECRET_KEY']):
-            abort(403)
+            abort(401)
         vk_id = int(request.args['vk_user_id'])
         user = User.query.filter_by(vk_id=vk_id).one_or_none()
         if user is None:
@@ -238,6 +244,34 @@ def manage_tournaments():
     db.session.add(new_tournament)
     db.session.commit()
     return '', 201
+
+
+@app.route('/tournament/org_info')
+@with_user
+def get_org_info_on_tournament():
+    tournament_id = request.args['tournament_id']
+    tournament = Tournament.query.get_or_404(tournament_id)
+    if tournament.user_id != g.user.id:
+        abort(403)
+    tour_info = {
+        'title': tournament.title,
+        'discipline': tournament.discipline,
+        'discipline_type': tournament.discipline_type.name,
+        'start_time': tournament.start_time.isoformat(),
+        'state': tournament.state.name,
+    }
+    if tournament.discipline_type == DisciplineType.solo:
+        participants = [
+            participant.user.vk_id
+            for participant in tournament.participants
+        ]
+    else:
+        participants = [
+            participant.team_id
+            for participant in tournament.team_participants
+        ]
+    tour_info['participants'] = participants
+    return jsonify(tournament=tour_info)
 
 
 @app.route('/tournament/register', methods=['POST'])
