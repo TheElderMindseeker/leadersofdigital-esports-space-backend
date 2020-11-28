@@ -45,6 +45,9 @@ class TournamentState(Enum):
 class ParticipantState(Enum):
     registered = auto()
     checked_in = auto()
+    playing = auto()
+    won = auto()
+    lost = auto()
 
 
 class User(db.Model):
@@ -70,7 +73,7 @@ class Team(db.Model):
     title = Column(Integer, nullable=False)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
 
-    captain = relationship('User')
+    captain = relationship('User', backref=backref('c_teams'))
     players = relationship('User', secondary=players, backref=backref('teams'))
 
 
@@ -86,7 +89,7 @@ class Tournament(db.Model):
     start_time = Column(DateTime, nullable=False)
     state = Column(SQLEnum(TournamentState), nullable=False)
 
-    user_id = Column(Integer, ForeignKey('user.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     creator = relationship('User')
 
 
@@ -96,6 +99,16 @@ class Participant(db.Model):
     user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
     tournament_id = Column(Integer, ForeignKey('tournaments.id'), primary_key=True)
     state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
+    place = Column(Integer)
+
+
+class TeamParticipant(db.Model):
+    __tablename__ = 'team_participants'
+
+    team_id = Column(Integer, ForeignKey('teams.id'), primary_key=True)
+    tournament_id = Column(Integer, ForeignKey('tournaments.id'), primary_key=True)
+    state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
+    place = Column(Integer)
 
 
 def with_user(callee):
@@ -107,16 +120,72 @@ def with_user(callee):
         user = User.query.filter_by(vk_id=vk_id).one_or_none()
         if user is None:
             user = User(vk_id=vk_id)
-            db.session.save(user)
+            db.session.add(user)
             db.session.commit()
-        g['user'] = user
+        g.user = user
         return callee(*args, **kwargs)
     return wrapper
 
 
+@app.route('/profile')
+@with_user
+def profile():
+    return jsonify(profile={
+        'id': g.user.id,
+        'tournaments': {
+            'part': 10,
+            'won': 2,
+        },
+        'matches': {
+            'part': 50,
+            'won': 15,
+        },
+    })
+
+
+@app.route('/teams', methods=['GET', 'POST'])
+@with_user
+def manage_teams():
+    if request.method == 'GET':
+        teams = [
+            {
+                'id': team.id,
+                'title': team.title,
+                'captain': team.captain.vk_id,
+                'is_captain': True,
+            }
+            for team in g.user.c_teams
+        ]
+        teams.extend(
+            {
+                'id': team.id,
+                'title': team.title,
+                'captain': team.captain.vk_id,
+                'is_captain': False,
+            }
+            for team in g.user.teams
+        )
+        return jsonify(teams=teams)
+    # POST
+    title = request.json['title']
+    new_team = Team(title=title, user_id=g.user.id)
+    db.session.add(new_team)
+    db.session.commit()
+    return '', 201
+
+
+@app.route('/teams/enter', methods=['POST'])
+@with_user
+def enter_team():
+    team = Team.query.get(request.json['team_id'])
+    team.players.append(g.user)
+    db.session.commit()
+    return '', 203
+
+
 @app.route('/tournaments', methods=['GET', 'POST'])
 @with_user
-def search_tournaments():
+def manage_tournaments():
     if request.method == 'GET':
         discipline = request.args.get('discipline', '')
         tournament_type = request.args.get('type')
@@ -164,7 +233,7 @@ def search_tournaments():
         type=TournamentType[request.json['type']],
         start_time=datetime.fromisoformat(request.json['start_time']),
         state='planned',
-        user_id=g['user'].id,
+        user_id=g.user.id,
     )
     db.session.add(new_tournament)
     db.session.commit()
@@ -174,14 +243,13 @@ def search_tournaments():
 @app.route('/tournament/register', methods=['POST'])
 @with_user
 def sign_up_for_tournament():
-    user = g['user']
     tournament_id = request.json['tournament_id']
     tournament = Tournament.query.get_or_404(tournament_id)
     if tournament.state == TournamentState.planned:
-        participation = Participant.query.get((user.id, tournament_id))
+        participation = Participant.query.get((g.user.id, tournament_id))
         if participation is not None:
             abort(400)
-        new_participant = Participant(user_id=user.id, tournament_id=tournament_id)
+        new_participant = Participant(user_id=g.user.id, tournament_id=tournament_id)
         db.session.add(new_participant)
         db.session.commit()
     else:
@@ -207,7 +275,27 @@ def check_in_to_tournament():
 @app.route('/tournaments/state', methods=['POST'])
 @with_user
 def change_tournament_state():
-    pass
+    tournament_id = request.json['tournament_id']
+    tournament = Tournament.query.get_or_404(tournament_id)
+    if tournament.creator.id != g.user.id:
+        abort(403)
+
+    if tournament.state == TournamentState.planned:
+        tournament.state = TournamentState.check_in
+    elif tournament.state == TournamentState.check_in:
+        tournament.state = TournamentState.in_progress
+        unchecked_ids = [
+            part.user_id for part in Participant.query.filter_by(tournament_id=tournament.id,
+                                                                 state=ParticipantState.registered).all()
+        ]
+        Participant.query.filter(
+            Participant.tournament_id == tournament_id, Participant.user_id.in_(unchecked_ids)).delete()
+    elif tournament.state == TournamentState.in_progress:
+        # TODO: Add winners
+        tournament.state = TournamentState.finished
+
+    db.session.commit()
+    return '', 203
 
 
 @app.route('/images', methods=['GET', 'POST'])
