@@ -87,7 +87,7 @@ class Team(db.Model):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    tournament_id = Column(Integer, ForeignKey('tournaments.id', nullable=False))
+    tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
     state = Column(SQLEnum(TeamState), nullable=False, default=TeamState.registered)
     title = Column(String)
     place = Column(Integer)
