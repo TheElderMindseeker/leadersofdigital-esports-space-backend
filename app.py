@@ -3,6 +3,7 @@ import functools
 import os
 from enum import Enum, auto
 from uuid import uuid4
+from http import HTTPStatus
 
 from sqlalchemy import Column, Integer, String, Enum as SQLEnum, DateTime, ForeignKey
 from flask import Flask, current_app, g, request, abort, send_from_directory, jsonify
@@ -31,8 +32,7 @@ class DisciplineType(Enum):
 
 
 class TournamentType(Enum):
-    play_off = 'play-off'
-    group = 'group'
+    play_off = auto()
 
 
 class TournamentState(Enum):
@@ -42,7 +42,7 @@ class TournamentState(Enum):
     finished = auto()
 
 
-class ParticipantState(Enum):
+class TeamState(Enum):
     registered = auto()
     checked_in = auto()
     playing = auto()
@@ -57,24 +57,6 @@ class User(db.Model):
     vk_id = Column(Integer, unique=True, nullable=False)
     rating = Column(Integer, nullable=False, default=0)
     coins = Column(Integer, nullable=False, default=0)
-
-
-players = db.Table(  # noqa
-    'players',
-    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
-    Column('team_id', Integer, ForeignKey('teams.id'), primary_key=True),
-)
-
-
-class Team(db.Model):
-    __tablename__ = 'teams'
-
-    id = Column(Integer, primary_key=True)
-    title = Column(Integer, nullable=False)
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-
-    captain = relationship('User', backref=backref('c_teams'))
-    players = relationship('User', secondary=players, backref=backref('teams'))
 
 
 class Tournament(db.Model):
@@ -93,28 +75,38 @@ class Tournament(db.Model):
     creator = relationship('User')
 
 
-class Participant(db.Model):
-    __tablename__ = 'participants'
+players = db.Table(  # noqa
+    'players',
+    Column('user_id', Integer, ForeignKey('users.id'), primary_key=True),
+    Column('team_id', Integer, ForeignKey('teams.id'), primary_key=True),
+)
 
-    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True)
-    tournament_id = Column(Integer, ForeignKey('tournaments.id'), primary_key=True)
-    state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
+
+class Team(db.Model):
+    __tablename__ = 'teams'
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    tournament_id = Column(Integer, ForeignKey('tournaments.id', nullable=False))
+    state = Column(SQLEnum(TeamState), nullable=False, default=TeamState.registered)
+    title = Column(String)
     place = Column(Integer)
 
-    user = relationship('User')
+    captain = relationship('User', backref=backref('c_teams'))
     tournament = relationship('Tournament', backref=backref('participants'))
+    players = relationship('User', secondary=players, backref=backref('teams'))
 
 
-class TeamParticipant(db.Model):
-    __tablename__ = 'team_participants'
-
-    team_id = Column(Integer, ForeignKey('teams.id'), primary_key=True)
-    tournament_id = Column(Integer, ForeignKey('tournaments.id'), primary_key=True)
-    state = Column(SQLEnum(ParticipantState), nullable=False, default=ParticipantState.registered)
-    place = Column(Integer)
-
-    team = relationship('Team')
-    tournament = relationship('Tournament', backref=backref('team_participants'))
+@app.route('/images', methods=['GET', 'POST'])
+def upload_image():
+    if request.method == 'GET':
+        return send_from_directory(app.config['UPLOAD_FOLDER'], request.args['filename'])
+    # POST
+    image_file = request.files['image']
+    name, ext = os.path.splitext(image_file.filename)
+    file_name = str(uuid4()) + ext
+    image_file.save(os.path.join(app.config['UPLOAD_FOLDER'], file_name))
+    return jsonify(filename=file_name)
 
 
 def with_user(callee):
@@ -133,62 +125,6 @@ def with_user(callee):
     return wrapper
 
 
-@app.route('/profile')
-@with_user
-def profile():
-    return jsonify(profile={
-        'id': g.user.id,
-        'tournaments': {
-            'part': 10,
-            'won': 2,
-        },
-        'matches': {
-            'part': 50,
-            'won': 15,
-        },
-    })
-
-
-@app.route('/teams', methods=['GET', 'POST'])
-@with_user
-def manage_teams():
-    if request.method == 'GET':
-        teams = [
-            {
-                'id': team.id,
-                'title': team.title,
-                'captain': team.captain.vk_id,
-                'is_captain': True,
-            }
-            for team in g.user.c_teams
-        ]
-        teams.extend(
-            {
-                'id': team.id,
-                'title': team.title,
-                'captain': team.captain.vk_id,
-                'is_captain': False,
-            }
-            for team in g.user.teams
-        )
-        return jsonify(teams=teams)
-    # POST
-    title = request.json['title']
-    new_team = Team(title=title, user_id=g.user.id)
-    db.session.add(new_team)
-    db.session.commit()
-    return '', 201
-
-
-@app.route('/teams/enter', methods=['POST'])
-@with_user
-def enter_team():
-    team = Team.query.get(request.json['team_id'])
-    team.players.append(g.user)
-    db.session.commit()
-    return '', 203
-
-
 @app.route('/tournaments', methods=['GET', 'POST'])
 @with_user
 def manage_tournaments():
@@ -204,7 +140,6 @@ def manage_tournaments():
         query = Tournament.query.filter(Tournament.discipline.ilike(discipline_filter))
         if tournament_type is not None:
             query = query.filter(Tournament.type == TournamentType[tournament_type])
-
         tournaments = query.all()
 
         if lower_date is not None:
@@ -243,74 +178,89 @@ def manage_tournaments():
     )
     db.session.add(new_tournament)
     db.session.commit()
-    return '', 201
+    return '', HTTPStatus.CREATED
 
 
-@app.route('/tournament/org_info')
+@app.route('/tournaments/info')
 @with_user
-def get_org_info_on_tournament():
-    tournament_id = request.args['tournament_id']
-    tournament = Tournament.query.get_or_404(tournament_id)
-    if tournament.user_id != g.user.id:
-        abort(403)
+def get_info_on_tournament():
+    tournament = Tournament.query.get_or_404(request.args['tournament_id'])
     tour_info = {
+        'id': tournament.id,
         'title': tournament.title,
+        'logo': tournament.logo,
         'discipline': tournament.discipline,
         'discipline_type': tournament.discipline_type.name,
         'start_time': tournament.start_time.isoformat(),
         'state': tournament.state.name,
     }
     if tournament.discipline_type == DisciplineType.solo:
-        participants = [
-            participant.user.vk_id
-            for participant in tournament.participants
-        ]
+        participants = [team.captain.vk_id for team in tournament.participants]
     else:
         participants = [
-            participant.team_id
-            for participant in tournament.team_participants
+            {
+                'title': team.title,
+                'captain': team.captain.vk_id,
+                'players': [
+                    player.vk_id for player in team.players
+                ]
+            }
+            for team in tournament.team_participants
         ]
     tour_info['participants'] = participants
     return jsonify(tournament=tour_info)
 
 
-@app.route('/tournament/register', methods=['POST'])
+@app.route('/tournaments/register', methods=['POST'])
 @with_user
 def sign_up_for_tournament():
     tournament_id = request.json['tournament_id']
     tournament = Tournament.query.get_or_404(tournament_id)
-    if tournament.state == TournamentState.planned:
-        participation = Participant.query.get((g.user.id, tournament_id))
-        if participation is not None:
-            abort(400)
-        new_participant = Participant(user_id=g.user.id, tournament_id=tournament_id)
-        db.session.add(new_participant)
-        db.session.commit()
-    else:
+    if tournament.state != TournamentState.planned:
         abort(400)
-    return '', 203
+
+    signed_up = [team.captain.id for team in tournament.participants]
+    if tournament.discipline_type == DisciplineType.team:
+        for team in tournament.participants:
+            signed_up.extend([player.id for player in team.players])
+    if g.user.id in signed_up or g.user.id == tournament.creator.id:
+        abort(400)
+
+    team_id = request.json.get('team_id')
+    if tournament.discipline_type == DisciplineType.solo:
+        new_team = Team(user_id=g.user.id, tournament_id=tournament_id)
+        db.session.add(new_team)
+    elif team_id is not None:
+        existing_team = Team.query.filter_by(id=team_id, tournament_id=tournament_id).first_or_404()
+        existing_team.players.append(g.user)
+    else:
+        title = request.json['title']
+        new_team = Team(user_id=g.user.id, tournament_id=tournament_id, title=title)
+        db.session.add(new_team)
+        db.session.commit()
+        return jsonify(team_id=new_team.id)
+
+    db.session.commit()
+    return '', HTTPStatus.NO_CONTENT
 
 
-@app.route('/tournament/check_in', methods=['POST'])
+@app.route('/tournaments/check_in', methods=['POST'])
 @with_user
 def check_in_to_tournament():
-    user = g['user']
     tournament_id = request.json['tournament_id']
     tournament = Tournament.query.get_or_404(tournament_id)
-    if tournament.state == TournamentState.check_in:
-        participation = Participant.query.get((user.id, tournament_id))
-        participation.state = ParticipantState.checked_in
-        db.session.commit()
-    else:
+    if tournament.state != TournamentState.check_in:
         abort(400)
-    return '', 203
+    team = Team.query.filter_by(user_id=g.user.id, tournament_id=tournament_id).first_or_404()
+    team.state = TeamState.checked_in
+    db.session.commit()
+    return '', HTTPStatus.NO_CONTENT
 
 
 @app.route('/tournaments/state', methods=['POST'])
 @with_user
 def change_tournament_state():
-    tournament_id = request.json['tournament_id']
-    tournament = Tournament.query.get_or_404(tournament_id)
+    tournament = Tournament.query.get_or_404(request.json['tournament_id'])
     if tournament.creator.id != g.user.id:
         abort(403)
 
@@ -318,27 +268,10 @@ def change_tournament_state():
         tournament.state = TournamentState.check_in
     elif tournament.state == TournamentState.check_in:
         tournament.state = TournamentState.in_progress
-        unchecked_ids = [
-            part.user_id for part in Participant.query.filter_by(tournament_id=tournament.id,
-                                                                 state=ParticipantState.registered).all()
-        ]
-        Participant.query.filter(
-            Participant.tournament_id == tournament_id, Participant.user_id.in_(unchecked_ids)).delete()
+        Team.query.filter_by(tournament_id=tournament.id, state=TeamState.registered).delete()
     elif tournament.state == TournamentState.in_progress:
         # TODO: Add winners
         tournament.state = TournamentState.finished
 
     db.session.commit()
-    return '', 203
-
-
-@app.route('/images', methods=['GET', 'POST'])
-def upload_image():
-    if request.method == 'GET':
-        return send_from_directory(app.config['UPLOAD_FOLDER'], request.args['filename'])
-    # POST
-    image_file = request.files['image']
-    name, ext = os.path.splitext(image_file.filename)
-    file_name = str(uuid4()) + ext
-    image_file.save(os.path.join(app.config['UPLOAD_FOLDER'], file_name))
-    return jsonify(filename=file_name)
+    return '', HTTPStatus.NO_CONTENT
