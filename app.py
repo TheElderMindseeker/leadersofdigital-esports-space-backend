@@ -2,19 +2,23 @@ from datetime import datetime, time
 import functools
 import os
 from enum import Enum, auto
+from uuid import uuid4
 
 from sqlalchemy import Column, Integer, String, Enum as SQLEnum, DateTime, ForeignKey
-from flask import Flask, current_app, g, request, abort
+from flask import Flask, current_app, g, request, abort, send_from_directory, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import relationship
 
 from vk import is_valid
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=None)
+script_path = os.path.dirname(os.path.abspath(__file__))
 
 app.config['VK_SECRET_KEY'] = os.environ['VK_SECRET_KEY']
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ['ESPORTS_DATABASE_URI']
+app.config['UPLOAD_FOLDER'] = os.path.join(script_path, 'uploads')
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 CORS(app)
 db = SQLAlchemy(app)
@@ -25,6 +29,7 @@ class User(db.Model):
 
     id = Column(Integer, primary_key=True)
     vk_id = Column(Integer, unique=True, nullable=False)
+    karma = Column(Integer, nullable=False, default=0)
 
 
 class DisciplineType(Enum):
@@ -49,6 +54,7 @@ class Tournament(db.Model):
 
     id = Column(Integer, primary_key=True)
     title = Column(String(1024), nullable=False)
+    logo = Column(String(1024))
     discipline = Column(String(256), nullable=False)
     discipline_type = Column(SQLEnum(DisciplineType), nullable=False)
     type = Column(SQLEnum(TournamentType), nullable=False)
@@ -102,10 +108,11 @@ def search_tournaments():
         if upper_time is not None:
             tournaments = [tour for tour in tournaments if tour.start_time.time() <= time.fromisoformat(upper_time)]
 
-        return [
+        return jsonify(tournaments=[
             {
                 'id': tour.id,
                 'title': tour.title,
+                'logo': tour.logo,
                 'discipline': tour.discipline,
                 'discipline_type': tour.discipline_type.name,
                 'type': tour.type.name,
@@ -114,10 +121,11 @@ def search_tournaments():
                 'creator': tour.creator.vk_id,
             }
             for tour in tournaments
-        ]
-
+        ])
+    # POST
     new_tournament = Tournament(
         title=request.json['title'],
+        logo=request.json.get('logo'),
         discipline=request.json['discipline'],
         discipline_type=DisciplineType[request.json['discipline_type']],
         type=TournamentType[request.json['type']],
@@ -127,3 +135,16 @@ def search_tournaments():
     )
     db.session.add(new_tournament)
     db.session.commit()
+    return '', 201
+
+
+@app.route('/images', methods=['GET', 'POST'])
+def upload_image():
+    if request.method == 'GET':
+        return send_from_directory(app.config['UPLOAD_FOLDER'], request.args['filename'])
+    # POST
+    image_file = request.files['image']
+    name, ext = os.path.splitext(image_file.filename)
+    file_name = str(uuid4()) + ext
+    image_file.save(os.path.join(app.config['UPLOAD_FOLDER'], file_name))
+    return jsonify(filename=file_name)
