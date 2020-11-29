@@ -1,16 +1,18 @@
-from datetime import datetime, time
 import functools
 import os
+from datetime import datetime, time
 from enum import Enum, auto
-from uuid import uuid4
 from http import HTTPStatus
+from random import shuffle
+from uuid import uuid4
 
-from sqlalchemy import Column, Integer, String, Enum as SQLEnum, DateTime, ForeignKey
 from flask import Flask, current_app, g, request, abort, send_from_directory, jsonify
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import Column, Integer, String, Enum as SQLEnum, DateTime, ForeignKey
 from sqlalchemy.orm import relationship, backref
 
+from play_off import PlayOff
 from vk import is_valid
 
 app = Flask(__name__, static_folder=None)
@@ -70,9 +72,24 @@ class Tournament(db.Model):
     type = Column(SQLEnum(TournamentType), nullable=False)
     start_time = Column(DateTime, nullable=False)
     state = Column(SQLEnum(TournamentState), nullable=False)
+    sequence = Column(String(4096))
 
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     creator = relationship('User')
+
+
+class Match(db.Model):
+    __tablename__ = 'matches'
+
+    id = Column(Integer, primary_key=True)
+    tournament_id = Column(Integer, ForeignKey('tournaments.id'), nullable=False)
+    left_id = Column(Integer, nullable=False)
+    right_id = Column(Integer, nullable=False)
+    team_id = Column(Integer, ForeignKey('teams.id'), nullable=False)
+    score = Column(String(64), nullable=False, default='1:0')
+
+    tournament = relationship('Tournament', backref=backref('matches'))
+    winner = relationship('Team', backref=backref('won_matches'))
 
 
 players = db.Table(  # noqa
@@ -178,7 +195,7 @@ def manage_tournaments():
     )
     db.session.add(new_tournament)
     db.session.commit()
-    return '', HTTPStatus.CREATED
+    return jsonify(tournament_id=new_tournament.id)
 
 
 @app.route('/tournaments/info')
@@ -269,9 +286,37 @@ def change_tournament_state():
     elif tournament.state == TournamentState.check_in:
         tournament.state = TournamentState.in_progress
         Team.query.filter_by(tournament_id=tournament.id, state=TeamState.registered).delete()
+        teams = Team.query.filter_by(tournament_id=tournament.id, state=TeamState.checked_in).all()
+        for team in teams:
+            team.state = TeamState.playing
+        team_ids = [team.id for team in teams]
+        power_of_two = 1
+        while power_of_two < len(team_ids):
+            power_of_two *= 2
+        team_ids.extend((-1,) * (power_of_two - len(team_ids)))
+        shuffle(team_ids)
+        tournament.sequence = ','.join(str(team_id) for team_id in team_ids)
     elif tournament.state == TournamentState.in_progress:
         # TODO: Add winners
         tournament.state = TournamentState.finished
 
     db.session.commit()
     return '', HTTPStatus.NO_CONTENT
+
+
+@app.route('/tournaments/next')
+@with_user
+def get_next_match():
+    tournament = Tournament.query.get_or_404(request.args['tournament_id'])
+    team = Team.query.filter_by(tournament_id=tournament.id, user_id=g.user.id).first_or_404()
+    sequence = [int(team_id) for team_id in tournament.sequence.split(',')]
+    matches = {(match.left_id, match.right_id): match.team_id for match in tournament.matches}
+    play_off = PlayOff(sequence, matches)
+    next_match = play_off.next_match_for(team.id)
+    if next_match['state'] == 'defined':
+        team = Team.query.get(next_match['id'])
+        next_match['team'] = {
+            'title': team.title,
+            'captain': team.captain.vk_id,
+        }
+    return jsonify(next=next_match)
