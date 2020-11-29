@@ -232,7 +232,7 @@ def get_info_on_tournament():
 @with_user
 def am_i_registered():
     user_teams = g.user.c_teams + g.user.teams
-    tournament_teams = [team for team in user_teams if team.tournament_id == request.args['tournament_id']]
+    tournament_teams = [team for team in user_teams if team.tournament_id == int(request.args['tournament_id'])]
     if not tournament_teams:
         return jsonify(team=dict())
     team = tournament_teams[0]
