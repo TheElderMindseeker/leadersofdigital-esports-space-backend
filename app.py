@@ -228,6 +228,21 @@ def get_info_on_tournament():
     return jsonify(tournament=tour_info)
 
 
+@app.route('/tournaments/me')
+@with_user
+def am_i_registered():
+    user_teams = g.user.c_teams + g.user.teams
+    tournament_teams = [team for team in user_teams if team.tournament_id == request.args['tournament_id']]
+    if not tournament_teams:
+        return jsonify(team=dict())
+    team = tournament_teams[0]
+    return jsonify(team={
+        'title': team.title,
+        'captain': team.captain.vk_id,
+        'players': [player.vk_id for player in team.players],
+    })
+
+
 @app.route('/tournaments/register', methods=['POST'])
 @with_user
 def sign_up_for_tournament():
