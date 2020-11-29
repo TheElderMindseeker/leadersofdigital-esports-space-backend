@@ -75,7 +75,7 @@ class Tournament(db.Model):
     sequence = Column(String(4096))
 
     user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
-    creator = relationship('User')
+    creator = relationship('User', backref=backref('organized'))
 
 
 class Match(db.Model):
@@ -320,3 +320,17 @@ def get_next_match():
             'captain': team.captain.vk_id,
         }
     return jsonify(next=next_match)
+
+
+@app.route('/statistics')
+@with_user
+def get_statistics():
+    user_teams = g.user.c_teams + g.user.teams
+    played = [team for team in user_teams if team.tournament.state == TournamentState.finished]
+    won = [team for team in played if team.state == TeamState.won]
+    return jsonify(stats={
+        'played': len(played),
+        'won': len(won),
+        'organized': len(g.user.organized),
+        'rating': g.user.rating,
+    })
