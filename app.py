@@ -237,6 +237,7 @@ def am_i_registered():
         return jsonify(team=dict())
     team = tournament_teams[0]
     return jsonify(team={
+        'id': team.id,
         'title': team.title,
         'captain': team.captain.vk_id,
         'players': [player.vk_id for player in team.players],
